@@ -134,15 +134,6 @@ struct scan_control {
 	/* The file folios on the current node are dangerously low */
 	unsigned int file_is_tiny:1;
 
-	/* The anonymous pages on the current node are below vm.anon_min_ratio */
-	unsigned int anon_below_min:1;
-
-	/* The clean file pages on the current node are below vm.clean_low_ratio */
-	unsigned int clean_below_low:1;
-
-	/* The clean file pages on the current node are below vm.clean_min_ratio */
-	unsigned int clean_below_min:1;
-
 	/* Always discard instead of demoting to lower tier memory */
 	unsigned int no_demotion:1;
 
@@ -191,14 +182,6 @@ struct scan_control {
 #else
 #define prefetchw_prev_lru_folio(_folio, _base, _field) do { } while (0)
 #endif
-
-u8 sysctl_anon_min_ratio  __read_mostly = CONFIG_ANON_MIN_RATIO;
-u8 sysctl_clean_low_ratio __read_mostly = CONFIG_CLEAN_LOW_RATIO;
-u8 sysctl_clean_min_ratio __read_mostly = CONFIG_CLEAN_MIN_RATIO;
-static u64 sysctl_anon_min_ratio_kb  __read_mostly = 0;
-static u64 sysctl_clean_low_ratio_kb __read_mostly = 0;
-static u64 sysctl_clean_min_ratio_kb __read_mostly = 0;
-static u64 workingset_protection_prev_totalram __read_mostly = 0;
 
 /*
  * From 0 .. 200.  Higher means more swappy.
@@ -2278,25 +2261,6 @@ static __always_inline void update_lru_sizes(struct lruvec *lruvec,
 
 }
 
-#ifdef CONFIG_CMA
-/*
- * It is waste of effort to scan and reclaim CMA pages if it is not available
- * for current allocation context. Kswapd can not be enrolled as it can not
- * distinguish this scenario by using sc->gfp_mask = GFP_KERNEL
- */
-static bool skip_cma(struct folio *folio, struct scan_control *sc)
-{
-	return !current_is_kswapd() &&
-			gfp_migratetype(sc->gfp_mask) != MIGRATE_MOVABLE &&
-			get_pageblock_migratetype(&folio->page) == MIGRATE_CMA;
-}
-#else
-static bool skip_cma(struct folio *folio, struct scan_control *sc)
-{
-	return false;
-}
-#endif
-
 /*
  * Isolating page from the lruvec to fill in @dst list by nr_to_scan times.
  *
@@ -2343,8 +2307,7 @@ static unsigned long isolate_lru_folios(unsigned long nr_to_scan,
 		nr_pages = folio_nr_pages(folio);
 		total_scan += nr_pages;
 
-		if (folio_zonenum(folio) > sc->reclaim_idx ||
-				skip_cma(folio, sc)) {
+		if (folio_zonenum(folio) > sc->reclaim_idx) {
 			nr_skipped[folio_zonenum(folio)] += nr_pages;
 			move_to = &folios_skipped;
 			goto move;
@@ -3089,15 +3052,6 @@ static void get_scan_count(struct lruvec *lruvec, struct scan_control *sc,
 	}
 
 	/*
-	 * Force-scan anon if clean file pages is under vm.clean_low_ratio
-	 * or vm.clean_min_ratio.
-	 */
-	if (sc->clean_below_low || sc->clean_below_min) {
-		scan_balance = SCAN_ANON;
-		goto out;
-	}
-
-	/*
 	 * If there is enough inactive page cache, we do not reclaim
 	 * anything from the anonymous working right now.
 	 */
@@ -3239,25 +3193,6 @@ out:
 		default:
 			/* Look ma, no brain */
 			BUG();
-		}
-
-		/*
-		 * Hard protection of the working set.
-		 */
-		if (file) {
-			/*
-			 * Don't reclaim file pages when the amount of
-			 * clean file pages is below vm.clean_min_ratio.
-			 */
-			if (sc->clean_below_min)
-				scan = 0;
-		} else {
-			/*
-			 * Don't reclaim anonymous pages when their
-			 * amount is below vm.anon_min_ratio.
-			 */
-			if (sc->anon_below_min)
-				scan = 0;
 		}
 
 		nr[lru] = scan;
@@ -5016,7 +4951,7 @@ static bool sort_folio(struct lruvec *lruvec, struct folio *folio, struct scan_c
 	}
 
 	/* ineligible */
-	if (zone > sc->reclaim_idx || skip_cma(folio, sc)) {
+	if (zone > sc->reclaim_idx) {
 		gen = folio_inc_gen(lruvec, folio, false);
 		list_move_tail(&folio->lru, &lrugen->folios[gen][type][zone]);
 		return true;
@@ -6534,88 +6469,6 @@ static inline bool should_continue_reclaim(struct pglist_data *pgdat,
 	return inactive_lru_pages > pages_for_compaction;
 }
 
-int vm_workingset_protection_update_handler(struct ctl_table *table, int write,
-		void __user *buffer, size_t *lenp, loff_t *ppos)
-{
-	int ret = proc_dou8vec_minmax(table, write, buffer, lenp, ppos);
-	if (ret || !write)
-		return ret;
-
-	workingset_protection_prev_totalram = 0;
-
-	return 0;
-}
-
-static void prepare_workingset_protection(pg_data_t *pgdat, struct scan_control *sc)
-{
-	unsigned long node_mem_total;
-	struct sysinfo i;
-	if (likely(sysctl_anon_min_ratio  ||
-	           sysctl_clean_low_ratio ||
-		       sysctl_clean_min_ratio)) {
-#ifdef CONFIG_NUMA
-		si_meminfo_node(&i, pgdat->node_id);
-#else //CONFIG_NUMA
-		si_meminfo(&i);
-#endif //CONFIG_NUMA
-		node_mem_total = i.totalram;
-
-		if (unlikely(workingset_protection_prev_totalram != node_mem_total)) {
-			sysctl_anon_min_ratio_kb  =
-				node_mem_total * sysctl_anon_min_ratio  / 100;
-			sysctl_clean_low_ratio_kb =
-				node_mem_total * sysctl_clean_low_ratio / 100;
-			sysctl_clean_min_ratio_kb =
-				node_mem_total * sysctl_clean_min_ratio / 100;
-			workingset_protection_prev_totalram = node_mem_total;
-		}
-	}
-
-	/*
-	 * Check the number of anonymous pages to protect them from
-	 * reclaiming if their amount is below the specified.
-	 */
-	if (sysctl_anon_min_ratio) {
-		unsigned long reclaimable_anon;
-
-		reclaimable_anon =
-			node_page_state(pgdat, NR_ACTIVE_ANON) +
-			node_page_state(pgdat, NR_INACTIVE_ANON) +
-			node_page_state(pgdat, NR_ISOLATED_ANON);
-
-		sc->anon_below_min = reclaimable_anon < sysctl_anon_min_ratio_kb;
-	} else
-		sc->anon_below_min = 0;
-
-	/*
-	 * Check the number of clean file pages to protect them from
-	 * reclaiming if their amount is below the specified.
-	 */
-	if (sysctl_clean_low_ratio || sysctl_clean_min_ratio) {
-		unsigned long reclaimable_file, dirty, clean;
-
-		reclaimable_file =
-			node_page_state(pgdat, NR_ACTIVE_FILE) +
-			node_page_state(pgdat, NR_INACTIVE_FILE) +
-			node_page_state(pgdat, NR_ISOLATED_FILE);
-		dirty = node_page_state(pgdat, NR_FILE_DIRTY);
-		/*
-		 * node_page_state() sum can go out of sync since
-		 * all the values are not read at once.
-		 */
-		if (likely(reclaimable_file > dirty))
-			clean = reclaimable_file - dirty;
-		else
-			clean = 0;
-
-		sc->clean_below_low = clean < sysctl_clean_low_ratio_kb;
-		sc->clean_below_min = clean < sysctl_clean_min_ratio_kb;
-	} else {
-		sc->clean_below_low = 0;
-		sc->clean_below_min = 0;
-	}
-}
-
 static void shrink_node_memcgs(pg_data_t *pgdat, struct scan_control *sc)
 {
 	struct mem_cgroup *target_memcg = sc->target_mem_cgroup;
@@ -6674,22 +6527,6 @@ static void shrink_node_memcgs(pg_data_t *pgdat, struct scan_control *sc)
 	} while ((memcg = mem_cgroup_iter(target_memcg, memcg, NULL)));
 }
 
-static void invoke_oom(struct scan_control *sc)
-{
-	struct oom_control oc = {
-		.gfp_mask = sc->gfp_mask,
-		.order = sc->order,
-	};
-
-	if (mem_cgroup_oom_synchronize(true))
-		return;
-
-	if (!mutex_trylock(&oom_lock))
-		return;
-	out_of_memory(&oc);
-	mutex_unlock(&oom_lock);
-}
-
 static void shrink_node(pg_data_t *pgdat, struct scan_control *sc)
 {
 	unsigned long nr_reclaimed, nr_scanned, nr_node_reclaimed;
@@ -6710,8 +6547,6 @@ again:
 	nr_scanned = sc->nr_scanned;
 
 	prepare_scan_count(pgdat, sc);
-
-	prepare_workingset_protection(pgdat, sc);
 
 	shrink_node_memcgs(pgdat, sc);
 
@@ -6801,10 +6636,6 @@ again:
 	 */
 	if (reclaimable)
 		pgdat->kswapd_failures = 0;
-
-	if (sc->clean_below_min && pgdat->kswapd_failures && !sc->priority) {
-		invoke_oom(sc);
-	}
 }
 
 /*

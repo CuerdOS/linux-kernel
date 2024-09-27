@@ -95,6 +95,10 @@ extern const int mmap_rnd_compat_bits_max;
 extern int mmap_rnd_compat_bits __read_mostly;
 #endif
 
+#ifndef PHYSMEM_END
+# define PHYSMEM_END	((1ULL << MAX_PHYSMEM_BITS) - 1)
+#endif
+
 #include <asm/page.h>
 #include <asm/processor.h>
 
@@ -194,13 +198,6 @@ static inline void __mm_zero_struct_page(struct page *page)
 #define DEFAULT_MAX_MAP_COUNT	(USHRT_MAX - MAPCOUNT_ELF_CORE_MARGIN)
 
 extern int sysctl_max_map_count;
-
-extern u8 sysctl_anon_min_ratio;
-extern u8 sysctl_clean_low_ratio;
-extern u8 sysctl_clean_min_ratio;
-int vm_workingset_protection_update_handler(
-	struct ctl_table *table, int write,
-	void __user *buffer, size_t *lenp, loff_t *ppos);
 
 extern unsigned long sysctl_user_reserve_kbytes;
 extern unsigned long sysctl_admin_reserve_kbytes;

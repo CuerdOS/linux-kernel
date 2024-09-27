@@ -5,12 +5,8 @@
  * sleep+wake cycles. EEVDF placement strategy #1, #2 if disabled.
  */
 SCHED_FEAT(PLACE_LAG, true)
-#if !defined(CONFIG_SCHED_BORE)
 SCHED_FEAT(PLACE_DEADLINE_INITIAL, true)
 SCHED_FEAT(RUN_TO_PARITY, true)
-#else // CONFIG_SCHED_BORE
-SCHED_FEAT(RUN_TO_PARITY, false)
-#endif // CONFIG_SCHED_BORE
 
 /*
  * Prefer to schedule the task we woke last (assuming it failed
