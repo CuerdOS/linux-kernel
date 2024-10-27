@@ -147,11 +147,14 @@ config ZSWAP_ZPOOL_DEFAULT_ZBUD
 	help
 	  Use the zbud allocator as the default allocator.
 
-config ZSWAP_ZPOOL_DEFAULT_Z3FOLD
-	bool "z3fold"
-	select Z3FOLD
+config ZSWAP_ZPOOL_DEFAULT_Z3FOLD_DEPRECATED
+	bool "z3foldi (DEPRECATED)"
+	select Z3FOLD_DEPRECATED
 	help
 	  Use the z3fold allocator as the default allocator.
+
+	  Deprecated and scheduled for removal in a few cycles,
+	  see CONFIG_Z3FOLD_DEPRECATED.
 
 config ZSWAP_ZPOOL_DEFAULT_ZSMALLOC
 	bool "zsmalloc"
@@ -164,7 +167,7 @@ config ZSWAP_ZPOOL_DEFAULT
        string
        depends on ZSWAP
        default "zbud" if ZSWAP_ZPOOL_DEFAULT_ZBUD
-       default "z3fold" if ZSWAP_ZPOOL_DEFAULT_Z3FOLD
+       default "z3fold" if ZSWAP_ZPOOL_DEFAULT_Z3FOLD_DEPRECATED
        default "zsmalloc" if ZSWAP_ZPOOL_DEFAULT_ZSMALLOC
        default ""
 
@@ -178,14 +181,24 @@ config ZBUD
 	  deterministic reclaim properties that make it preferable to a higher
 	  density approach when reclaim will be used.
 
-config Z3FOLD
-	tristate "3:1 compression allocator (z3fold)"
+config Z3FOLD_DEPRECATED
+	tristate "3:1 compression allocator (z3fold) (DEPRECATED)"
 	depends on ZSWAP
 	help
+	  Deprecated and scheduled for removal in a few cycles. If you have
+	  a good reason for using Z3FOLD over ZSMALLOC, please contact
+	  linux-mm@kvack.org and the zswap maintainers.
+
 	  A special purpose allocator for storing compressed pages.
 	  It is designed to store up to three compressed pages per physical
 	  page. It is a ZBUD derivative so the simplicity and determinism are
 	  still there.
+
+config Z3FOLD
+	tristate
+	default y if Z3FOLD_DEPRECATED=y
+	default m if Z3FOLD_DEPRECATED=m
+	depends on Z3FOLD_DEPRECATED
 
 config ZSMALLOC
 	tristate
@@ -508,6 +521,69 @@ config ARCH_WANT_OPTIMIZE_DAX_VMEMMAP
 
 config ARCH_WANT_OPTIMIZE_HUGETLB_VMEMMAP
 	bool
+
+config ANON_MIN_RATIO
+	int "Default value for vm.anon_min_ratio"
+	depends on SYSCTL
+	range 0 100
+	default 0
+	help
+	  This option sets the default value for vm.anon_min_ratio sysctl knob.
+
+	  The vm.anon_min_ratio sysctl knob provides *hard* protection of
+	  anonymous pages. The anonymous pages on the current node won't be
+	  reclaimed under any conditions when their amount is below
+	  vm.anon_min_ratio. This knob may be used to prevent excessive swap
+	  thrashing when anonymous memory is low (for example, when memory is
+	  going to be overfilled by compressed data of zram module).
+
+	  Setting this value too high (close to MemTotal) can result in
+	  inability to swap and can lead to early OOM under memory pressure.
+
+config CLEAN_LOW_RATIO
+	int "Default value for vm.clean_low_ratio"
+	depends on SYSCTL
+	range 0 100
+	default 0
+	help
+	  This option sets the default value for vm.clean_low_ratio sysctl knob.
+
+	  The vm.clean_low_ratio sysctl knob provides *best-effort*
+	  protection of clean file pages. The file pages on the current node
+	  won't be reclaimed under memory pressure when the amount of clean file
+	  pages is below vm.clean_low_ratio *unless* we threaten to OOM.
+	  Protection of clean file pages using this knob may be used when
+	  swapping is still possible to
+	    - prevent disk I/O thrashing under memory pressure;
+	    - improve performance in disk cache-bound tasks under memory
+	      pressure.
+
+	  Setting it to a high value may result in a early eviction of anonymous
+	  pages into the swap space by attempting to hold the protected amount
+	  of clean file pages in memory.
+
+config CLEAN_MIN_RATIO
+	int "Default value for vm.clean_min_ratio"
+	depends on SYSCTL
+	range 0 100
+	default 1
+	help
+	  This option sets the default value for vm.clean_min_ratio sysctl knob.
+
+	  The vm.clean_min_ratio sysctl knob provides *hard* protection of
+	  clean file pages. The file pages on the current node won't be
+	  reclaimed under memory pressure when the amount of clean file pages is
+	  below vm.clean_min_ratio. Hard protection of clean file pages using
+	  this knob may be used to
+	    - prevent disk I/O thrashing under memory pressure even with no free
+	      swap space;
+	    - improve performance in disk cache-bound tasks under memory
+	      pressure;
+	    - avoid high latency and prevent livelock in near-OOM conditions.
+
+	  Setting it to a high value may result in a early out-of-memory condition
+	  due to the inability to reclaim the protected amount of clean file pages
+	  when other types of pages cannot be reclaimed.
 
 config HAVE_MEMBLOCK_PHYS_MAP
 	bool
