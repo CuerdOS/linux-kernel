@@ -212,6 +212,17 @@ pid>/``).
 This value defaults to 0.
 
 
+core_sort_vma
+=============
+
+The default coredump writes VMAs in address order. By setting
+``core_sort_vma`` to 1, VMAs will be written from smallest size
+to largest size. This is known to break at least elfutils, but
+can be handy when dealing with very large (and truncated)
+coredumps where the more useful debugging details are included
+in the smaller VMAs.
+
+
 core_uses_pid
 =============
 
@@ -1673,3 +1684,12 @@ is 10 seconds.
 
 The softlockup threshold is (``2 * watchdog_thresh``). Setting this
 tunable to zero will disable lockup detection altogether.
+
+yield_type:
+===========
+
+BMQ/PDS CPU scheduler only. This determines what type of yield calls
+to sched_yield() will be performed.
+
+  0 - No yield.
+  1 - Requeue task. (default)
