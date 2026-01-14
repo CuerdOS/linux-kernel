@@ -22,18 +22,19 @@ ifneq ($(CONFIG_SCHED_OMIT_FRAME_POINTER),y)
 CFLAGS_core.o := $(PROFILING) -fno-omit-frame-pointer
 endif
 
+# Branch profiling isn't noinstr-safe
+ifdef CONFIG_TRACE_BRANCH_PROFILING
+CFLAGS_build_policy.o += -DDISABLE_BRANCH_PROFILING
+CFLAGS_build_utility.o += -DDISABLE_BRANCH_PROFILING
+endif
 #
 # Build efficiency:
 #
 # These compilation units have roughly the same size and complexity - so their
 # build parallelizes well and finishes roughly at once:
 #
-ifdef CONFIG_SCHED_ALT
-obj-y += alt_core.o
-obj-$(CONFIG_SCHED_DEBUG) += alt_debug.o
-else
 obj-y += core.o
 obj-y += fair.o
-endif
 obj-y += build_policy.o
 obj-y += build_utility.o
+obj-$(CONFIG_SCHED_BORE) += bore.o

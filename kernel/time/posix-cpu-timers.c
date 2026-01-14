@@ -223,7 +223,7 @@ static void task_sample_cputime(struct task_struct *p, u64 *samples)
 	u64 stime, utime;
 
 	task_cputime(p, &utime, &stime);
-	store_samples(samples, stime, utime, tsk_seruntime(p));
+	store_samples(samples, stime, utime, p->se.sum_exec_runtime);
 }
 
 static void proc_sample_cputime_atomic(struct task_cputime_atomic *at,
@@ -453,7 +453,6 @@ static void disarm_timer(struct k_itimer *timer, struct task_struct *p)
 	struct cpu_timer *ctmr = &timer->it.cpu;
 	struct posix_cputimer_base *base;
 
-	timer->it_active = 0;
 	if (!cpu_timer_dequeue(ctmr))
 		return;
 
@@ -494,19 +493,28 @@ static int posix_cpu_timer_del(struct k_itimer *timer)
 		 */
 		WARN_ON_ONCE(ctmr->head || timerqueue_node_queued(&ctmr->node));
 	} else {
-		if (timer->it.cpu.firing)
+		if (timer->it.cpu.firing) {
+			/*
+			 * Prevent signal delivery. The timer cannot be dequeued
+			 * because it is on the firing list which is not protected
+			 * by sighand->lock. The delivery path is waiting for
+			 * the timer lock. So go back, unlock and retry.
+			 */
+			timer->it.cpu.firing = false;
 			ret = TIMER_RETRY;
-		else
+		} else {
 			disarm_timer(timer, p);
-
+		}
 		unlock_task_sighand(p, &flags);
 	}
 
 out:
 	rcu_read_unlock();
-	if (!ret)
-		put_pid(ctmr->pid);
 
+	if (!ret) {
+		put_pid(ctmr->pid);
+		timer->it_status = POSIX_TIMER_DISARMED;
+	}
 	return ret;
 }
 
@@ -560,7 +568,7 @@ static void arm_timer(struct k_itimer *timer, struct task_struct *p)
 	struct cpu_timer *ctmr = &timer->it.cpu;
 	u64 newexp = cpu_timer_getexpires(ctmr);
 
-	timer->it_active = 1;
+	timer->it_status = POSIX_TIMER_ARMED;
 	if (!cpu_timer_enqueue(&base->tqhead, ctmr))
 		return;
 
@@ -586,29 +594,20 @@ static void cpu_timer_fire(struct k_itimer *timer)
 {
 	struct cpu_timer *ctmr = &timer->it.cpu;
 
-	timer->it_active = 0;
-	if (unlikely(timer->sigq == NULL)) {
+	timer->it_status = POSIX_TIMER_DISARMED;
+
+	if (unlikely(ctmr->nanosleep)) {
 		/*
 		 * This a special case for clock_nanosleep,
 		 * not a normal timer from sys_timer_create.
 		 */
 		wake_up_process(timer->it_process);
 		cpu_timer_setexpires(ctmr, 0);
-	} else if (!timer->it_interval) {
-		/*
-		 * One-shot timer.  Clear it as soon as it's fired.
-		 */
+	} else {
 		posix_timer_queue_signal(timer);
-		cpu_timer_setexpires(ctmr, 0);
-	} else if (posix_timer_queue_signal(timer)) {
-		/*
-		 * The signal did not get queued because the signal
-		 * was ignored, so we won't get any callback to
-		 * reload the timer.  But we need to keep it
-		 * ticking in case the signal is deliverable next time.
-		 */
-		posix_cpu_timer_rearm(timer);
-		++timer->it_requeue_pending;
+		/* Disable oneshot timers */
+		if (!timer->it_interval)
+			cpu_timer_setexpires(ctmr, 0);
 	}
 }
 
@@ -667,11 +666,17 @@ static int posix_cpu_timer_set(struct k_itimer *timer, int timer_flags,
 	old_expires = cpu_timer_getexpires(ctmr);
 
 	if (unlikely(timer->it.cpu.firing)) {
-		timer->it.cpu.firing = -1;
+		/*
+		 * Prevent signal delivery. The timer cannot be dequeued
+		 * because it is on the firing list which is not protected
+		 * by sighand->lock. The delivery path is waiting for
+		 * the timer lock. So go back, unlock and retry.
+		 */
+		timer->it.cpu.firing = false;
 		ret = TIMER_RETRY;
 	} else {
 		cpu_timer_dequeue(ctmr);
-		timer->it_active = 0;
+		timer->it_status = POSIX_TIMER_DISARMED;
 	}
 
 	/*
@@ -745,7 +750,7 @@ static void __posix_cpu_timer_get(struct k_itimer *timer, struct itimerspec64 *i
 	 *  - Timers which expired, but the signal has not yet been
 	 *    delivered
 	 */
-	if (iv && ((timer->it_requeue_pending & REQUEUE_PENDING) || sigev_none))
+	if (iv && timer->it_status != POSIX_TIMER_ARMED)
 		expires = bump_cpu_timer(timer, now);
 	else
 		expires = cpu_timer_getexpires(&timer->it.cpu);
@@ -808,7 +813,7 @@ static u64 collect_timerqueue(struct timerqueue_head *head,
 		if (++i == MAX_COLLECTED || now < expires)
 			return expires;
 
-		ctmr->firing = 1;
+		ctmr->firing = true;
 		/* See posix_cpu_timer_wait_running() */
 		rcu_assign_pointer(ctmr->handling, current);
 		cpu_timer_dequeue(ctmr);
@@ -830,7 +835,6 @@ static void collect_posix_cputimers(struct posix_cputimers *pct, u64 *samples,
 	}
 }
 
-#ifndef CONFIG_SCHED_ALT
 static inline void check_dl_overrun(struct task_struct *tsk)
 {
 	if (tsk->dl.dl_overrun) {
@@ -838,7 +842,6 @@ static inline void check_dl_overrun(struct task_struct *tsk)
 		send_signal_locked(SIGXCPU, SEND_SIG_PRIV, tsk, PIDTYPE_TGID);
 	}
 }
-#endif
 
 static bool check_rlimit(u64 time, u64 limit, int signo, bool rt, bool hard)
 {
@@ -866,10 +869,8 @@ static void check_thread_timers(struct task_struct *tsk,
 	u64 samples[CPUCLOCK_MAX];
 	unsigned long soft;
 
-#ifndef CONFIG_SCHED_ALT
 	if (dl_task(tsk))
 		check_dl_overrun(tsk);
-#endif
 
 	if (expiry_cache_is_inactive(pct))
 		return;
@@ -883,7 +884,7 @@ static void check_thread_timers(struct task_struct *tsk,
 	soft = task_rlimit(tsk, RLIMIT_RTTIME);
 	if (soft != RLIM_INFINITY) {
 		/* Task RT timeout is accounted in jiffies. RTTIME is usec */
-		unsigned long rttime = tsk_rttimeout(tsk) * (USEC_PER_SEC / HZ);
+		unsigned long rttime = tsk->rt.timeout * (USEC_PER_SEC / HZ);
 		unsigned long hard = task_rlimit_max(tsk, RLIMIT_RTTIME);
 
 		/* At the hard limit, send SIGKILL. No further action. */
@@ -1119,10 +1120,8 @@ static inline bool fastpath_timer_check(struct task_struct *tsk)
 			return true;
 	}
 
-#ifndef CONFIG_SCHED_ALT
 	if (dl_task(tsk) && tsk->dl.dl_overrun)
 		return true;
-#endif
 
 	return false;
 }
@@ -1369,7 +1368,7 @@ static void handle_posix_cpu_timers(struct task_struct *tsk)
 	 * timer call will interfere.
 	 */
 	list_for_each_entry_safe(timer, next, &firing, it.cpu.elist) {
-		int cpu_firing;
+		bool cpu_firing;
 
 		/*
 		 * spin_lock() is sufficient here even independent of the
@@ -1381,13 +1380,13 @@ static void handle_posix_cpu_timers(struct task_struct *tsk)
 		spin_lock(&timer->it_lock);
 		list_del_init(&timer->it.cpu.elist);
 		cpu_firing = timer->it.cpu.firing;
-		timer->it.cpu.firing = 0;
+		timer->it.cpu.firing = false;
 		/*
-		 * The firing flag is -1 if we collided with a reset
-		 * of the timer, which already reported this
-		 * almost-firing as an overrun.  So don't generate an event.
+		 * If the firing flag is cleared then this raced with a
+		 * timer rearm/delete operation. So don't generate an
+		 * event.
 		 */
-		if (likely(cpu_firing >= 0))
+		if (likely(cpu_firing))
 			cpu_timer_fire(timer);
 		/* See posix_cpu_timer_wait_running() */
 		rcu_assign_pointer(timer->it.cpu.handling, NULL);
@@ -1493,6 +1492,7 @@ static int do_cpu_nanosleep(const clockid_t which_clock, int flags,
 	timer.it_overrun = -1;
 	error = posix_cpu_timer_create(&timer);
 	timer.it_process = current;
+	timer.it.cpu.nanosleep = true;
 
 	if (!error) {
 		static struct itimerspec64 zero_it;

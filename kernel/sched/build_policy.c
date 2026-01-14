@@ -49,24 +49,18 @@
 
 #include "idle.c"
 
-#ifndef CONFIG_SCHED_ALT
 #include "rt.c"
-#endif
+#include "cpudeadline.c"
 
-#ifdef CONFIG_SMP
-#ifndef CONFIG_SCHED_ALT
-# include "cpudeadline.c"
-#endif
-# include "pelt.c"
-#endif
+#include "pelt.c"
 
 #include "cputime.c"
-#ifndef CONFIG_SCHED_ALT
 #include "deadline.c"
-#endif
 
 #ifdef CONFIG_SCHED_CLASS_EXT
+# include "ext_internal.h"
 # include "ext.c"
+# include "ext_idle.c"
 #endif
 
 #include "syscalls.c"

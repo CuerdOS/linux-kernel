@@ -23,6 +23,7 @@
 #include <linux/io.h>
 
 #include <asm/css_chars.h>
+#include <asm/machine.h>
 #include <asm/debug.h>
 #include <asm/idals.h>
 #include <asm/ebcdic.h>
@@ -1953,7 +1954,7 @@ static int dasd_eckd_validate_server(struct dasd_device *device,
 	if (private->uid.type == UA_BASE_PAV_ALIAS ||
 	    private->uid.type == UA_HYPER_PAV_ALIAS)
 		return 0;
-	if (dasd_nopav || MACHINE_IS_VM)
+	if (dasd_nopav || machine_is_vm())
 		enable_pav = 0;
 	else
 		enable_pav = 1;
@@ -2405,7 +2406,7 @@ static int dasd_eckd_end_analysis(struct dasd_block *block)
 	}
 
 	if (count_area != NULL && count_area->kl == 0) {
-		/* we found notthing violating our disk layout */
+		/* we found nothing violating our disk layout */
 		if (dasd_check_blocksize(count_area->dl) == 0)
 			block->bp_block = count_area->dl;
 	}
@@ -6149,6 +6150,7 @@ static int dasd_eckd_copy_pair_swap(struct dasd_device *device, char *prim_busid
 	struct dasd_copy_relation *copy;
 	struct dasd_block *block;
 	struct gendisk *gdp;
+	int rc;
 
 	copy = device->copy;
 	if (!copy)
@@ -6183,6 +6185,13 @@ static int dasd_eckd_copy_pair_swap(struct dasd_device *device, char *prim_busid
 	/* swap blocklayer device link */
 	gdp = block->gdp;
 	dasd_add_link_to_gendisk(gdp, secondary);
+	rc = device_move(disk_to_dev(gdp), &secondary->cdev->dev, DPM_ORDER_NONE);
+	if (rc) {
+		dev_err(&primary->cdev->dev,
+			"copy_pair_swap: moving blockdevice parent %s->%s failed (%d)\n",
+			dev_name(&primary->cdev->dev),
+			dev_name(&secondary->cdev->dev), rc);
+	}
 
 	/* re-enable device */
 	dasd_device_remove_stop_bits(primary, DASD_STOPPED_PPRC);

@@ -369,8 +369,8 @@ int sk_msg_memcopy_from_iter(struct sock *sk, struct iov_iter *from,
 			     struct sk_msg *msg, u32 bytes)
 {
 	int ret = -ENOSPC, i = msg->sg.curr;
+	u32 copy, buf_size, copied = 0;
 	struct scatterlist *sge;
-	u32 copy, buf_size;
 	void *to;
 
 	do {
@@ -397,6 +397,7 @@ int sk_msg_memcopy_from_iter(struct sock *sk, struct iov_iter *from,
 			goto out;
 		}
 		bytes -= copy;
+		copied += copy;
 		if (!bytes)
 			break;
 		msg->sg.copybreak = 0;
@@ -404,7 +405,7 @@ int sk_msg_memcopy_from_iter(struct sock *sk, struct iov_iter *from,
 	} while (i != msg->sg.end);
 out:
 	msg->sg.curr = i;
-	return ret;
+	return (ret < 0) ? ret : copied;
 }
 EXPORT_SYMBOL_GPL(sk_msg_memcopy_from_iter);
 
@@ -655,6 +656,13 @@ static void sk_psock_backlog(struct work_struct *work)
 	bool ingress;
 	int ret;
 
+	/* If sk is quickly removed from the map and then added back, the old
+	 * psock should not be scheduled, because there are now two psocks
+	 * pointing to the same sk.
+	 */
+	if (!sk_psock_test_state(psock, SK_PSOCK_TX_ENABLED))
+		return;
+
 	/* Increment the psock refcnt to synchronize with close(fd) path in
 	 * sock_map_close(), ensuring we wait for backlog thread completion
 	 * before sk_socket freed. If refcnt increment fails, it indicates
@@ -868,7 +876,7 @@ void sk_psock_drop(struct sock *sk, struct sk_psock *psock)
 	sk_psock_stop(psock);
 
 	INIT_RCU_WORK(&psock->rwork, sk_psock_destroy);
-	queue_rcu_work(system_wq, &psock->rwork);
+	queue_rcu_work(system_percpu_wq, &psock->rwork);
 }
 EXPORT_SYMBOL_GPL(sk_psock_drop);
 

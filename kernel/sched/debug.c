@@ -6,8 +6,10 @@
  *
  * Copyright(C) 2007, Red Hat, Inc., Ingo Molnar
  */
+#include <linux/debugfs.h>
+#include <linux/nmi.h>
+#include "sched.h"
 
-#ifndef CONFIG_SCHED_ALT
 /*
  * This allows printing both to /sys/kernel/debug/sched/debug and
  * to the console
@@ -91,10 +93,10 @@ static void sched_feat_enable(int i)
 {
 	static_key_enable_cpuslocked(&sched_feat_keys[i]);
 }
-#else
+#else /* !CONFIG_JUMP_LABEL: */
 static void sched_feat_disable(int i) { };
 static void sched_feat_enable(int i) { };
-#endif /* CONFIG_JUMP_LABEL */
+#endif /* !CONFIG_JUMP_LABEL */
 
 static int sched_feat_set(char *cmp)
 {
@@ -167,8 +169,53 @@ static const struct file_operations sched_feat_fops = {
 	.release	= single_release,
 };
 
-#ifdef CONFIG_SMP
+#ifdef CONFIG_SCHED_BORE
+#define DEFINE_SYSCTL_SCHED_FUNC(name, update_func) \
+static ssize_t sched_##name##_write(struct file *filp, const char __user *ubuf, size_t cnt, loff_t *ppos) \
+{ \
+	char buf[16]; \
+	unsigned int value; \
+\
+	if (cnt > 15) \
+		cnt = 15; \
+\
+	if (copy_from_user(&buf, ubuf, cnt)) \
+		return -EFAULT; \
+	buf[cnt] = '\0'; \
+\
+	if (kstrtouint(buf, 10, &value)) \
+		return -EINVAL; \
+\
+	sysctl_sched_##name = value; \
+	sched_update_##update_func(); \
+\
+	*ppos += cnt; \
+	return cnt; \
+} \
+\
+static int sched_##name##_show(struct seq_file *m, void *v) \
+{ \
+	seq_printf(m, "%d\n", sysctl_sched_##name); \
+	return 0; \
+} \
+\
+static int sched_##name##_open(struct inode *inode, struct file *filp) \
+{ \
+	return single_open(filp, sched_##name##_show, NULL); \
+} \
+\
+static const struct file_operations sched_##name##_fops = { \
+	.open		= sched_##name##_open, \
+	.write		= sched_##name##_write, \
+	.read		= seq_read, \
+	.llseek		= seq_lseek, \
+	.release	= single_release, \
+};
 
+DEFINE_SYSCTL_SCHED_FUNC(min_base_slice, min_base_slice)
+
+#undef DEFINE_SYSCTL_SCHED_FUNC
+#else /* !CONFIG_SCHED_BORE */
 static ssize_t sched_scaling_write(struct file *filp, const char __user *ubuf,
 				   size_t cnt, loff_t *ppos)
 {
@@ -214,9 +261,7 @@ static const struct file_operations sched_scaling_fops = {
 	.llseek		= seq_lseek,
 	.release	= single_release,
 };
-
-#endif /* SMP */
-#endif /* !CONFIG_SCHED_ALT */
+#endif /* CONFIG_SCHED_BORE */
 
 #ifdef CONFIG_PREEMPT_DYNAMIC
 
@@ -246,12 +291,15 @@ static ssize_t sched_dynamic_write(struct file *filp, const char __user *ubuf,
 
 static int sched_dynamic_show(struct seq_file *m, void *v)
 {
-	static const char * preempt_modes[] = {
-		"none", "voluntary", "full"
-	};
-	int i;
+	int i = IS_ENABLED(CONFIG_PREEMPT_RT) * 2;
+	int j;
 
-	for (i = 0; i < ARRAY_SIZE(preempt_modes); i++) {
+	/* Count entries in NULL terminated preempt_modes */
+	for (j = 0; preempt_modes[j]; j++)
+		;
+	j -= !IS_ENABLED(CONFIG_ARCH_HAS_PREEMPT_LAZY);
+
+	for (; i < j; i++) {
 		if (preempt_dynamic_mode == i)
 			seq_puts(m, "(");
 		seq_puts(m, preempt_modes[i]);
@@ -280,10 +328,8 @@ static const struct file_operations sched_dynamic_fops = {
 
 #endif /* CONFIG_PREEMPT_DYNAMIC */
 
-#ifndef CONFIG_SCHED_ALT
 __read_mostly bool sched_debug_verbose;
 
-#ifdef CONFIG_SMP
 static struct dentry           *sd_dentry;
 
 
@@ -294,7 +340,7 @@ static ssize_t sched_verbose_write(struct file *filp, const char __user *ubuf,
 	bool orig;
 
 	cpus_read_lock();
-	mutex_lock(&sched_domains_mutex);
+	sched_domains_mutex_lock();
 
 	orig = sched_debug_verbose;
 	result = debugfs_write_file_bool(filp, ubuf, cnt, ppos);
@@ -306,14 +352,11 @@ static ssize_t sched_verbose_write(struct file *filp, const char __user *ubuf,
 		sd_dentry = NULL;
 	}
 
-	mutex_unlock(&sched_domains_mutex);
+	sched_domains_mutex_unlock();
 	cpus_read_unlock();
 
 	return result;
 }
-#else
-#define sched_verbose_write debugfs_write_file_bool
-#endif
 
 static const struct file_operations sched_verbose_fops = {
 	.read =         debugfs_read_file_bool,
@@ -381,10 +424,8 @@ static ssize_t sched_fair_server_write(struct file *filp, const char __user *ubu
 			return  -EINVAL;
 		}
 
-		if (rq->cfs.h_nr_queued) {
-			update_rq_clock(rq);
-			dl_server_stop(&rq->fair_server);
-		}
+		update_rq_clock(rq);
+		dl_server_stop(&rq->fair_server);
 
 		retval = dl_server_apply_params(&rq->fair_server, runtime, period, 0);
 		if (retval)
@@ -471,11 +512,9 @@ static const struct file_operations fair_server_period_fops = {
 	.llseek		= seq_lseek,
 	.release	= single_release,
 };
-#endif /* !CONFIG_SCHED_ALT */
 
 static struct dentry *debugfs_sched;
 
-#ifndef CONFIG_SCHED_ALT
 static void debugfs_fair_server_init(void)
 {
 	struct dentry *d_fair;
@@ -496,7 +535,6 @@ static void debugfs_fair_server_init(void)
 		debugfs_create_file("period", 0644, d_cpu, (void *) cpu, &fair_server_period_fops);
 	}
 }
-#endif /* !CONFIG_SCHED_ALT */
 
 static __init int sched_init_debug(void)
 {
@@ -504,29 +542,31 @@ static __init int sched_init_debug(void)
 
 	debugfs_sched = debugfs_create_dir("sched", NULL);
 
-#ifndef CONFIG_SCHED_ALT
 	debugfs_create_file("features", 0644, debugfs_sched, NULL, &sched_feat_fops);
 	debugfs_create_file_unsafe("verbose", 0644, debugfs_sched, &sched_debug_verbose, &sched_verbose_fops);
-#endif /* !CONFIG_SCHED_ALT */
 #ifdef CONFIG_PREEMPT_DYNAMIC
 	debugfs_create_file("preempt", 0644, debugfs_sched, NULL, &sched_dynamic_fops);
 #endif
 
+#ifdef CONFIG_SCHED_BORE
+	debugfs_create_file("min_base_slice_ns", 0644, debugfs_sched, NULL, &sched_min_base_slice_fops);
+	debugfs_create_u32("base_slice_ns", 0444, debugfs_sched, &sysctl_sched_base_slice);
+#else /* !CONFIG_SCHED_BORE */
 	debugfs_create_u32("base_slice_ns", 0644, debugfs_sched, &sysctl_sched_base_slice);
+#endif /* CONFIG_SCHED_BORE */
 
-#ifndef CONFIG_SCHED_ALT
 	debugfs_create_u32("latency_warn_ms", 0644, debugfs_sched, &sysctl_resched_latency_warn_ms);
 	debugfs_create_u32("latency_warn_once", 0644, debugfs_sched, &sysctl_resched_latency_warn_once);
 
-#ifdef CONFIG_SMP
+#if !defined(CONFIG_SCHED_BORE)
 	debugfs_create_file("tunable_scaling", 0644, debugfs_sched, NULL, &sched_scaling_fops);
+#endif /* CONFIG_SCHED_BORE */
 	debugfs_create_u32("migration_cost_ns", 0644, debugfs_sched, &sysctl_sched_migration_cost);
 	debugfs_create_u32("nr_migrate", 0644, debugfs_sched, &sysctl_sched_nr_migrate);
 
-	mutex_lock(&sched_domains_mutex);
+	sched_domains_mutex_lock();
 	update_sched_domain_debugfs();
-	mutex_unlock(&sched_domains_mutex);
-#endif
+	sched_domains_mutex_unlock();
 
 #ifdef CONFIG_NUMA_BALANCING
 	numa = debugfs_create_dir("numa_balancing", debugfs_sched);
@@ -536,21 +576,15 @@ static __init int sched_init_debug(void)
 	debugfs_create_u32("scan_period_max_ms", 0644, numa, &sysctl_numa_balancing_scan_period_max);
 	debugfs_create_u32("scan_size_mb", 0644, numa, &sysctl_numa_balancing_scan_size);
 	debugfs_create_u32("hot_threshold_ms", 0644, numa, &sysctl_numa_balancing_hot_threshold);
-#endif
+#endif /* CONFIG_NUMA_BALANCING */
 
 	debugfs_create_file("debug", 0444, debugfs_sched, NULL, &sched_debug_fops);
-#endif /* !CONFIG_SCHED_ALT */
 
-#ifndef CONFIG_SCHED_ALT
 	debugfs_fair_server_init();
-#endif /* !CONFIG_SCHED_ALT */
 
 	return 0;
 }
 late_initcall(sched_init_debug);
-
-#ifndef CONFIG_SCHED_ALT
-#ifdef CONFIG_SMP
 
 static cpumask_var_t		sd_sysctl_cpus;
 
@@ -598,6 +632,10 @@ static void register_sd(struct sched_domain *sd, struct dentry *parent)
 	debugfs_create_file("flags", 0444, parent, &sd->flags, &sd_flags_fops);
 	debugfs_create_file("groups_flags", 0444, parent, &sd->groups->flags, &sd_flags_fops);
 	debugfs_create_u32("level", 0444, parent, (u32 *)&sd->level);
+
+	if (sd->flags & SD_ASYM_PACKING)
+		debugfs_create_u32("group_asym_prefer_cpu", 0444, parent,
+				   (u32 *)&sd->groups->asym_prefer_cpu);
 }
 
 void update_sched_domain_debugfs(void)
@@ -658,8 +696,6 @@ void dirty_sched_domain_sysctl(int cpu)
 		__cpumask_set_cpu(cpu, sd_sysctl_cpus);
 }
 
-#endif /* CONFIG_SMP */
-
 #ifdef CONFIG_FAIR_GROUP_SCHED
 static void print_cfs_group_stats(struct seq_file *m, int cpu, struct task_group *tg)
 {
@@ -696,18 +732,16 @@ static void print_cfs_group_stats(struct seq_file *m, int cpu, struct task_group
 	}
 
 	P(se->load.weight);
-#ifdef CONFIG_SMP
 	P(se->avg.load_avg);
 	P(se->avg.util_avg);
 	P(se->avg.runnable_avg);
-#endif
 
 #undef PN_SCHEDSTAT
 #undef PN
 #undef P_SCHEDSTAT
 #undef P
 }
-#endif
+#endif /* CONFIG_FAIR_GROUP_SCHED */
 
 #ifdef CONFIG_CGROUP_SCHED
 static DEFINE_SPINLOCK(sched_debug_lock);
@@ -768,6 +802,9 @@ print_task(struct seq_file *m, struct rq *rq, struct task_struct *p)
 		SPLIT_NS(schedstat_val_or_zero(p->stats.sum_sleep_runtime)),
 		SPLIT_NS(schedstat_val_or_zero(p->stats.sum_block_runtime)));
 
+#ifdef CONFIG_SCHED_BORE
+	SEQ_printf(m, " %2d", p->bore.score);
+#endif /* CONFIG_SCHED_BORE */
 #ifdef CONFIG_NUMA_BALANCING
 	SEQ_printf(m, "   %d      %d", task_node(p), task_numa_group_id(p));
 #endif
@@ -817,7 +854,7 @@ static void print_rq(struct seq_file *m, struct rq *rq, int rq_cpu)
 
 void print_cfs_rq(struct seq_file *m, int cpu, struct cfs_rq *cfs_rq)
 {
-	s64 left_vruntime = -1, min_vruntime, right_vruntime = -1, left_deadline = -1, spread;
+	s64 left_vruntime = -1, zero_vruntime, right_vruntime = -1, left_deadline = -1, spread;
 	struct sched_entity *last, *first, *root;
 	struct rq *rq = cpu_rq(cpu);
 	unsigned long flags;
@@ -840,31 +877,26 @@ void print_cfs_rq(struct seq_file *m, int cpu, struct cfs_rq *cfs_rq)
 	last = __pick_last_entity(cfs_rq);
 	if (last)
 		right_vruntime = last->vruntime;
-	min_vruntime = cfs_rq->min_vruntime;
+	zero_vruntime = cfs_rq->zero_vruntime;
 	raw_spin_rq_unlock_irqrestore(rq, flags);
 
 	SEQ_printf(m, "  .%-30s: %Ld.%06ld\n", "left_deadline",
 			SPLIT_NS(left_deadline));
 	SEQ_printf(m, "  .%-30s: %Ld.%06ld\n", "left_vruntime",
 			SPLIT_NS(left_vruntime));
-	SEQ_printf(m, "  .%-30s: %Ld.%06ld\n", "min_vruntime",
-			SPLIT_NS(min_vruntime));
+	SEQ_printf(m, "  .%-30s: %Ld.%06ld\n", "zero_vruntime",
+			SPLIT_NS(zero_vruntime));
 	SEQ_printf(m, "  .%-30s: %Ld.%06ld\n", "avg_vruntime",
 			SPLIT_NS(avg_vruntime(cfs_rq)));
 	SEQ_printf(m, "  .%-30s: %Ld.%06ld\n", "right_vruntime",
 			SPLIT_NS(right_vruntime));
 	spread = right_vruntime - left_vruntime;
 	SEQ_printf(m, "  .%-30s: %Ld.%06ld\n", "spread", SPLIT_NS(spread));
-	SEQ_printf(m, "  .%-30s: %d\n", "nr_running", cfs_rq->nr_running);
+	SEQ_printf(m, "  .%-30s: %d\n", "nr_queued", cfs_rq->nr_queued);
 	SEQ_printf(m, "  .%-30s: %d\n", "h_nr_runnable", cfs_rq->h_nr_runnable);
 	SEQ_printf(m, "  .%-30s: %d\n", "h_nr_queued", cfs_rq->h_nr_queued);
-	SEQ_printf(m, "  .%-30s: %d\n", "h_nr_delayed", cfs_rq->h_nr_delayed);
-	SEQ_printf(m, "  .%-30s: %d\n", "idle_nr_running",
-			cfs_rq->idle_nr_running);
-	SEQ_printf(m, "  .%-30s: %d\n", "idle_h_nr_running",
-			cfs_rq->idle_h_nr_running);
+	SEQ_printf(m, "  .%-30s: %d\n", "h_nr_idle", cfs_rq->h_nr_idle);
 	SEQ_printf(m, "  .%-30s: %ld\n", "load", cfs_rq->load.weight);
-#ifdef CONFIG_SMP
 	SEQ_printf(m, "  .%-30s: %lu\n", "load_avg",
 			cfs_rq->avg.load_avg);
 	SEQ_printf(m, "  .%-30s: %lu\n", "runnable_avg",
@@ -884,8 +916,7 @@ void print_cfs_rq(struct seq_file *m, int cpu, struct cfs_rq *cfs_rq)
 			cfs_rq->tg_load_avg_contrib);
 	SEQ_printf(m, "  .%-30s: %ld\n", "tg_load_avg",
 			atomic_long_read(&cfs_rq->tg->load_avg));
-#endif
-#endif
+#endif /* CONFIG_FAIR_GROUP_SCHED */
 #ifdef CONFIG_CFS_BANDWIDTH
 	SEQ_printf(m, "  .%-30s: %d\n", "throttled",
 			cfs_rq->throttled);
@@ -939,11 +970,7 @@ void print_dl_rq(struct seq_file *m, int cpu, struct dl_rq *dl_rq)
 	SEQ_printf(m, "  .%-30s: %lu\n", #x, (unsigned long)(dl_rq->x))
 
 	PU(dl_nr_running);
-#ifdef CONFIG_SMP
 	dl_bw = &cpu_rq(cpu)->rd->dl_bw;
-#else
-	dl_bw = &dl_rq->dl_bw;
-#endif
 	SEQ_printf(m, "  .%-30s: %lld\n", "dl_bw->bw", dl_bw->bw);
 	SEQ_printf(m, "  .%-30s: %lld\n", "dl_bw->total_bw", dl_bw->total_bw);
 
@@ -961,9 +988,9 @@ static void print_cpu(struct seq_file *m, int cpu)
 		SEQ_printf(m, "cpu#%d, %u.%03u MHz\n",
 			   cpu, freq / 1000, (freq % 1000));
 	}
-#else
+#else /* !CONFIG_X86: */
 	SEQ_printf(m, "cpu#%d\n", cpu);
-#endif
+#endif /* !CONFIG_X86 */
 
 #define P(x)								\
 do {									\
@@ -986,12 +1013,10 @@ do {									\
 #undef P
 #undef PN
 
-#ifdef CONFIG_SMP
 #define P64(n) SEQ_printf(m, "  .%-30s: %Ld\n", #n, rq->n);
 	P64(avg_idle);
 	P64(max_idle_balance_cost);
 #undef P64
-#endif
 
 #define P(n) SEQ_printf(m, "  .%-30s: %d\n", #n, schedstat_val(rq->n));
 	if (schedstat_enabled()) {
@@ -1173,7 +1198,7 @@ static void sched_show_numa(struct task_struct *p, struct seq_file *m)
 	SEQ_printf(m, "current_node=%d, numa_group_id=%d\n",
 			task_node(p), task_numa_group_id(p));
 	show_numa_stats(p, m);
-#endif
+#endif /* CONFIG_NUMA_BALANCING */
 }
 
 void proc_sched_show_task(struct task_struct *p, struct pid_namespace *ns,
@@ -1257,7 +1282,9 @@ void proc_sched_show_task(struct task_struct *p, struct pid_namespace *ns,
 	__PS("nr_involuntary_switches", p->nivcsw);
 
 	P(se.load.weight);
-#ifdef CONFIG_SMP
+#ifdef CONFIG_SCHED_BORE
+	P(bore.score);
+#endif /* CONFIG_SCHED_BORE */
 	P(se.avg.load_sum);
 	P(se.avg.runnable_sum);
 	P(se.avg.util_sum);
@@ -1266,13 +1293,12 @@ void proc_sched_show_task(struct task_struct *p, struct pid_namespace *ns,
 	P(se.avg.util_avg);
 	P(se.avg.last_update_time);
 	PM(se.avg.util_est, ~UTIL_AVG_UNCHANGED);
-#endif
 #ifdef CONFIG_UCLAMP_TASK
 	__PS("uclamp.min", p->uclamp_req[UCLAMP_MIN].value);
 	__PS("uclamp.max", p->uclamp_req[UCLAMP_MAX].value);
 	__PS("effective uclamp.min", uclamp_eff_value(p, UCLAMP_MIN));
 	__PS("effective uclamp.max", uclamp_eff_value(p, UCLAMP_MAX));
-#endif
+#endif /* CONFIG_UCLAMP_TASK */
 	P(policy);
 	P(prio);
 	if (task_has_dl_policy(p)) {
@@ -1305,14 +1331,15 @@ void proc_sched_set_task(struct task_struct *p)
 	memset(&p->stats, 0, sizeof(p->stats));
 #endif
 }
-#endif /* !CONFIG_SCHED_ALT */
 
 void resched_latency_warn(int cpu, u64 latency)
 {
 	static DEFINE_RATELIMIT_STATE(latency_check_ratelimit, 60 * 60 * HZ, 1);
 
-	WARN(__ratelimit(&latency_check_ratelimit),
-	     "sched: CPU %d need_resched set for > %llu ns (%d ticks) "
-	     "without schedule\n",
-	     cpu, latency, cpu_rq(cpu)->ticks_without_resched);
+	if (likely(!__ratelimit(&latency_check_ratelimit)))
+		return;
+
+	pr_err("sched: CPU %d need_resched set for > %llu ns (%d ticks) without schedule\n",
+	       cpu, latency, cpu_rq(cpu)->ticks_without_resched);
+	dump_stack();
 }

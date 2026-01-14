@@ -18,8 +18,11 @@ SCHED_FEAT(PLACE_REL_DEADLINE, true)
  * 0-lag point or until is has exhausted it's slice.
  */
 SCHED_FEAT(RUN_TO_PARITY, true)
+#ifdef CONFIG_SCHED_BORE
+SCHED_FEAT(RUN_TO_PARITY_BORE, false)
+#endif /* CONFIG_SCHED_BORE */
 /*
- * Allow wakeup of tasks with a shorter slice to cancel RESPECT_SLICE for
+ * Allow wakeup of tasks with a shorter slice to cancel RUN_TO_PARITY for
  * current.
  */
 SCHED_FEAT(PREEMPT_SHORT, true)
@@ -65,7 +68,6 @@ SCHED_FEAT(WAKEUP_PREEMPTION, true)
 
 SCHED_FEAT(HRTICK, false)
 SCHED_FEAT(HRTICK_DL, false)
-SCHED_FEAT(DOUBLE_TICK, false)
 
 /*
  * Decrement CPU capacity based on time not spent running tasks
@@ -122,3 +124,8 @@ SCHED_FEAT(WA_BIAS, true)
 SCHED_FEAT(UTIL_EST, true)
 
 SCHED_FEAT(LATENCY_WARN, false)
+
+/*
+ * Do newidle balancing proportional to its success rate using randomization.
+ */
+SCHED_FEAT(NI_RANDOM, true)

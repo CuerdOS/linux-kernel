@@ -27,11 +27,15 @@ static struct signal_struct init_signals = {
 	},
 	.multiprocess	= HLIST_HEAD_INIT,
 	.rlim		= INIT_RLIMITS,
+#ifdef CONFIG_CGROUPS
+	.cgroup_threadgroup_rwsem	= __RWSEM_INITIALIZER(init_signals.cgroup_threadgroup_rwsem),
+#endif
 	.cred_guard_mutex = __MUTEX_INITIALIZER(init_signals.cred_guard_mutex),
 	.exec_update_lock = __RWSEM_INITIALIZER(init_signals.exec_update_lock),
 #ifdef CONFIG_POSIX_TIMERS
-	.posix_timers	= HLIST_HEAD_INIT,
-	.cputimer	= {
+	.posix_timers		= HLIST_HEAD_INIT,
+	.ignored_posix_timers	= HLIST_HEAD_INIT,
+	.cputimer		= {
 		.cputime_atomic	= INIT_CPUTIME_ATOMIC,
 	},
 #endif
@@ -71,16 +75,9 @@ struct task_struct init_task __aligned(L1_CACHE_BYTES) = {
 	.stack		= init_stack,
 	.usage		= REFCOUNT_INIT(2),
 	.flags		= PF_KTHREAD,
-#ifdef CONFIG_SCHED_ALT
-	.on_cpu		= 1,
-	.prio		= DEFAULT_PRIO,
-	.static_prio	= DEFAULT_PRIO,
-	.normal_prio	= DEFAULT_PRIO,
-#else
 	.prio		= MAX_PRIO - 20,
 	.static_prio	= MAX_PRIO - 20,
 	.normal_prio	= MAX_PRIO - 20,
-#endif
 	.policy		= SCHED_NORMAL,
 	.cpus_ptr	= &init_task.cpus_mask,
 	.user_cpus_ptr	= NULL,
@@ -93,16 +90,6 @@ struct task_struct init_task __aligned(L1_CACHE_BYTES) = {
 	.restart_block	= {
 		.fn = do_no_restart_syscall,
 	},
-#ifdef CONFIG_SCHED_ALT
-	.sq_node	= LIST_HEAD_INIT(init_task.sq_node),
-#ifdef CONFIG_SCHED_BMQ
-	.boost_prio	= 0,
-#endif
-#ifdef CONFIG_SCHED_PDS
-	.deadline	= 0,
-#endif
-	.time_slice	= HZ,
-#else
 	.se		= {
 		.group_node 	= LIST_HEAD_INIT(init_task.se.group_node),
 	},
@@ -110,12 +97,9 @@ struct task_struct init_task __aligned(L1_CACHE_BYTES) = {
 		.run_list	= LIST_HEAD_INIT(init_task.rt.run_list),
 		.time_slice	= RR_TIMESLICE,
 	},
-#endif
 	.tasks		= LIST_HEAD_INIT(init_task.tasks),
-#ifndef CONFIG_SCHED_ALT
 #ifdef CONFIG_SMP
 	.pushable_tasks	= PLIST_NODE_INIT(init_task.pushable_tasks, MAX_PRIO),
-#endif
 #endif
 #ifdef CONFIG_CGROUP_SCHED
 	.sched_task_group = &root_task_group,
